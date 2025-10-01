@@ -77,6 +77,7 @@ runs:
         PUBROOT="$OUT/public"
         PUBDIR="$PUBROOT/repo/${PCP_VER}/${ARCH}/tcz"
 
+        # Version ONLY inside .info (filenames stay unversioned)
         RAW="${GITHUB_REF_NAME:-}"
         if echo "${RAW}" | grep -qE '^v'; then
           VERSION="${RAW#v}"
@@ -84,19 +85,16 @@ runs:
           VERSION="$(date +%Y.%m.%d)"
         fi
 
-        if [ ! -d "$SRC_DIR" ]; then
-          echo "ERROR: missing $SRC_DIR"; exit 1
-        fi
+        [ -d "$SRC_DIR" ] || { echo "ERROR: missing $SRC_DIR"; exit 1; }
 
         rm -rf "$BUILD"
         mkdir -p "$STAGE" "$TCZDIR" "$PUBROOT" "$PUBDIR"
 
-        # Seed existing gh-pages into PUBROOT (so indexes list ALL packages)
+        # ---- Seed existing gh-pages into PUBROOT (so indexes list ALL packages) ----
         if [ -n "${PAGES_REPO}" ]; then
           echo "[INFO] Seeding from ${PAGES_REPO}@${PAGES_BRANCH}"
           GIT_URL="https://github.com/${PAGES_REPO}.git"
           if [ -n "${PAGES_TOKEN}" ]; then
-            # use actor+token only if provided by caller; avoid echoing token
             GIT_URL="https://${GITHUB_ACTOR}:${PAGES_TOKEN}@github.com/${PAGES_REPO}.git"
           fi
           if git clone --depth 1 --branch "${PAGES_BRANCH}" "${GIT_URL}" "${PUBROOT}.tmp" >/dev/null 2>&1; then
@@ -108,8 +106,10 @@ runs:
           fi
         fi
 
-        # Build .tcz
+        # ---- Build .tcz from src/pkgroot -------------------------------------------
         cp -a "$SRC_DIR/." "$STAGE/"
+
+        # Ensure tce.installed scripts are executable (handles web-edited 0644 files)
         if [ -d "$STAGE/usr/local/tce.installed" ]; then
           chmod 755 "$STAGE/usr/local/tce.installed/"* || true
         fi
@@ -119,16 +119,19 @@ runs:
 
         pushd "$TCZDIR" >/dev/null
 
+        # Optional .dep (one package per line)
         if [ "${ADD_DEPS}" = "true" ] && [ -n "${DEPS_LIST}" ]; then
           printf '%s\n' "${DEPS_LIST}" | sed '/^$/d' > "${PKG}.tcz.dep"
         fi
 
+        # Sidecars
         md5sum "${PKG}.tcz" > "${PKG}.tcz.md5.txt"
         unsquashfs -ll "${PKG}.tcz" \
           | awk 'NR>2{p=$NF; sub(/^squashfs-root\//,"",p); print p}' \
           > "${PKG}.tcz.list"
         SIZE=$(du -h "${PKG}.tcz" | awk '{print $1}')
 
+        # .info
         {
           printf 'Title:          %s\n' "${PKG}"
           printf 'Description:    %s\n' "${DESC}"
@@ -139,10 +142,11 @@ runs:
           printf 'Comments:       Built from src/pkgroot; repo path /repo/%s/%s/tcz/\n' "${PCP_VER}" "${ARCH}"
         } > "${PKG}.tcz.info"
 
+        # Stage into seeded tree
         install -d "${PUBDIR}"
         cp -a ${PKG}.tcz* "${PUBDIR}/"
 
-        # Per-folder index
+        # ---- Per-folder index for /repo/<ver>/<arch>/tcz/ ---------------------------
         {
           echo '<!doctype html><meta charset="utf-8"><title>pCP repo</title>'
           echo '<h1>pCP repo /repo/'"${PCP_VER}"'/'"${ARCH}"'/tcz/</h1><ul>'
@@ -155,7 +159,37 @@ runs:
 
         popd >/dev/null
 
-        # Root index from FULL seeded tree
+        # ---- Directory indexes for browsing the tree --------------------------------
+        make_dir_index() {
+          local d="$1"; local title="$2"
+          mkdir -p "$d"
+          {
+            echo '<!doctype html><meta charset="utf-8"><title>'"$title"'</title>'
+            echo '<h1>'"$title"'</h1><ul>'
+            if [ -d "$d" ]; then
+              # list subdirectories first
+              (cd "$d" && ls -1A) | while read name; do
+                [ -d "$d/$name" ] && printf '<li><a href="%s/">%s/</a></li>\n' "$name" "$name"
+              done
+              # then files (if any)
+              (cd "$d" && ls -1A) | while read name; do
+                [ -f "$d/$name" ] && printf '<li><a href="%s">%s</a></li>\n' "$name" "$name"
+              done
+            fi
+            echo '</ul>'
+          } > "$d/index.html"
+        }
+
+        # repo root: lists versions (e.g. 16.x/)
+        make_dir_index "$PUBROOT/repo" "pCP repo: /repo/"
+
+        # version level: lists arches (e.g. armhf/, aarch64/)
+        make_dir_index "$PUBROOT/repo/${PCP_VER}" "pCP repo: /repo/${PCP_VER}/"
+
+        # arch level: lists subfolders (e.g. tcz/)
+        make_dir_index "$PUBROOT/repo/${PCP_VER}/${ARCH}" "pCP repo: /repo/${PCP_VER}/${ARCH}/"
+
+        # ---- Site root index (overview of the whole repo tree) ----------------------
         ROOTIDX="$PUBROOT/index.html"
         mkdir -p "$(dirname "$ROOTIDX")"
         {
