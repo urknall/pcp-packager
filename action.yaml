@@ -1,0 +1,172 @@
+name: pcp-packager
+description: Build pCP .tcz from src/pkgroot and stage under /repo/<ver>/<arch>/tcz
+
+inputs:
+  pkg:
+    description: Package name, produces <pkg>.tcz
+    required: true
+  pcp_ver:
+    description: pCP version path fragment (e.g. 16.x)
+    required: false
+    default: "16.x"
+  arch:
+    description: Architecture path fragment (e.g. armhf)
+    required: false
+    default: "armhf"
+  description:
+    description: Description for .tcz.info
+    required: false
+    default: "pCP extension"
+  author:
+    description: Author for .tcz.info
+    required: false
+    default: "urknall"
+  add_deps:
+    description: Write a .dep file (true/false)
+    required: false
+    default: "false"
+  deps_list:
+    description: Newline-separated .dep contents
+    required: false
+    default: ""
+  pages_repo:
+    description: Optional GitHub Pages repo to pre-seed (e.g. urknall/pcp-repo)
+    required: false
+    default: ""
+  pages_branch:
+    description: Branch to seed from (default gh-pages)
+    required: false
+    default: "gh-pages"
+  pages_token:
+    description: Token provided by the caller workflow (e.g. secrets.GH_PAGES_TOKEN)
+    required: false
+    default: ""
+
+runs:
+  using: "composite"
+  steps:
+    - name: Install packaging tools
+      shell: bash
+      run: |
+        set -e
+        sudo apt-get update
+        sudo apt-get install -y squashfs-tools rsync git
+
+    - name: Build .tcz and stage into repo tree
+      shell: bash
+      env:
+        PKG:          ${{ inputs.pkg }}
+        PCP_VER:      ${{ inputs.pcp_ver }}
+        ARCH:         ${{ inputs.arch }}
+        DESC:         ${{ inputs.description }}
+        AUTHOR:       ${{ inputs.author }}
+        ADD_DEPS:     ${{ inputs.add_deps }}
+        DEPS_LIST:    ${{ inputs.deps_list }}
+        PAGES_REPO:   ${{ inputs.pages_repo }}
+        PAGES_BRANCH: ${{ inputs.pages_branch }}
+        PAGES_TOKEN:  ${{ inputs.pages_token }}
+      run: |
+        set -euo pipefail
+
+        ROOT="$PWD"
+        SRC_DIR="$ROOT/src/pkgroot"
+        BUILD="$ROOT/build"
+        STAGE="$BUILD/pkgroot"
+        OUT="$BUILD/out"
+        TCZDIR="$OUT/tcz"
+        PUBROOT="$OUT/public"
+        PUBDIR="$PUBROOT/repo/${PCP_VER}/${ARCH}/tcz"
+
+        RAW="${GITHUB_REF_NAME:-}"
+        if echo "${RAW}" | grep -qE '^v'; then
+          VERSION="${RAW#v}"
+        else
+          VERSION="$(date +%Y.%m.%d)"
+        fi
+
+        if [ ! -d "$SRC_DIR" ]; then
+          echo "ERROR: missing $SRC_DIR"; exit 1
+        fi
+
+        rm -rf "$BUILD"
+        mkdir -p "$STAGE" "$TCZDIR" "$PUBROOT" "$PUBDIR"
+
+        # Seed existing gh-pages into PUBROOT (so indexes list ALL packages)
+        if [ -n "${PAGES_REPO}" ]; then
+          echo "[INFO] Seeding from ${PAGES_REPO}@${PAGES_BRANCH}"
+          GIT_URL="https://github.com/${PAGES_REPO}.git"
+          if [ -n "${PAGES_TOKEN}" ]; then
+            # use actor+token only if provided by caller; avoid echoing token
+            GIT_URL="https://${GITHUB_ACTOR}:${PAGES_TOKEN}@github.com/${PAGES_REPO}.git"
+          fi
+          if git clone --depth 1 --branch "${PAGES_BRANCH}" "${GIT_URL}" "${PUBROOT}.tmp" >/dev/null 2>&1; then
+            rsync -a --delete --exclude='.git' "${PUBROOT}.tmp"/ "${PUBROOT}"/
+            rm -rf "${PUBROOT}.tmp"
+            echo "[INFO] Seeded existing site into ${PUBROOT}"
+          else
+            echo "[WARN] Could not clone ${PAGES_REPO}@${PAGES_BRANCH}; starting with empty site."
+          fi
+        fi
+
+        # Build .tcz
+        cp -a "$SRC_DIR/." "$STAGE/"
+        if [ -d "$STAGE/usr/local/tce.installed" ]; then
+          chmod 755 "$STAGE/usr/local/tce.installed/"* || true
+        fi
+
+        TCZ="$TCZDIR/${PKG}.tcz"
+        mksquashfs "$STAGE" "$TCZ" -all-root -noappend -no-xattrs >/dev/null
+
+        pushd "$TCZDIR" >/dev/null
+
+        if [ "${ADD_DEPS}" = "true" ] && [ -n "${DEPS_LIST}" ]; then
+          printf '%s\n' "${DEPS_LIST}" | sed '/^$/d' > "${PKG}.tcz.dep"
+        fi
+
+        md5sum "${PKG}.tcz" > "${PKG}.tcz.md5.txt"
+        unsquashfs -ll "${PKG}.tcz" \
+          | awk 'NR>2{p=$NF; sub(/^squashfs-root\//,"",p); print p}' \
+          > "${PKG}.tcz.list"
+        SIZE=$(du -h "${PKG}.tcz" | awk '{print $1}')
+
+        {
+          printf 'Title:          %s\n' "${PKG}"
+          printf 'Description:    %s\n' "${DESC}"
+          printf 'Version:        %s\n' "${VERSION}"
+          printf 'Author:         %s\n' "${AUTHOR}"
+          printf 'Copying-policy: MIT\n'
+          printf 'Size:           %s\n' "${SIZE}"
+          printf 'Comments:       Built from src/pkgroot; repo path /repo/%s/%s/tcz/\n' "${PCP_VER}" "${ARCH}"
+        } > "${PKG}.tcz.info"
+
+        install -d "${PUBDIR}"
+        cp -a ${PKG}.tcz* "${PUBDIR}/"
+
+        # Per-folder index
+        {
+          echo '<!doctype html><meta charset="utf-8"><title>pCP repo</title>'
+          echo '<h1>pCP repo /repo/'"${PCP_VER}"'/'"${ARCH}"'/tcz/</h1><ul>'
+          for f in "${PUBDIR}"/*; do
+            bn=$(basename "$f")
+            printf '<li><a href="%s">%s</a></li>\n' "$bn" "$bn"
+          done
+          echo '</ul>'
+        } > "${PUBDIR}/index.html"
+
+        popd >/dev/null
+
+        # Root index from FULL seeded tree
+        ROOTIDX="$PUBROOT/index.html"
+        mkdir -p "$(dirname "$ROOTIDX")"
+        {
+          echo '<!doctype html><meta charset="utf-8"><title>pCP repo root</title>'
+          echo '<h1>pCP repo root</h1><ul>'
+          if [ -d "$PUBROOT/repo" ]; then
+            (cd "$PUBROOT" && find repo -type d | sort) | while read d; do
+              printf '<li><a href="%s/">%s/</a></li>\n' "$d" "$d"
+            done
+          else
+            echo '<li><em>No repo/ directory yet</em></li>'
+          fi
+          echo '</ul>'
+        } > "$ROOTIDX"
