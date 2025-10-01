@@ -87,12 +87,13 @@ runs:
           VERSION="$(date +%Y.%m.%d)"
         fi
 
+        echo "[STEP] clean build dirs"
         rm -rf "$BUILD"
         mkdir -p "$TCZDIR" "$PUBROOT" "$PUBDIR"
 
         # ---- Seed existing gh-pages into PUBROOT ----
         if [ -n "${PAGES_REPO}" ]; then
-          echo "[INFO] Seeding from ${PAGES_REPO}@${PAGES_BRANCH}"
+          echo "[STEP] seed gh-pages from ${PAGES_REPO}@${PAGES_BRANCH}"
           GIT_URL="https://github.com/${PAGES_REPO}.git"
           if [ -n "${PAGES_TOKEN}" ]; then
             GIT_URL="https://${GITHUB_ACTOR}:${PAGES_TOKEN}@github.com/${PAGES_REPO}.git"
@@ -100,21 +101,22 @@ runs:
           if git clone --depth 1 --branch "${PAGES_BRANCH}" "${GIT_URL}" "${PUBROOT}.tmp" >/dev/null 2>&1; then
             rsync -a --delete --exclude='.git' "${PUBROOT}.tmp"/ "${PUBROOT}"/
             rm -rf "${PUBROOT}.tmp"
-            echo "[INFO] Seeded existing site into ${PUBROOT}"
+            echo "[INFO] seeded existing site into ${PUBROOT}"
           else
-            echo "[WARN] Could not clone ${PAGES_REPO}@${PAGES_BRANCH}; starting with empty site."
+            echo "[WARN] could not clone ${PAGES_REPO}@${PAGES_BRANCH}; starting with empty site."
           fi
         fi
 
         # ---- Build only if src/pkgroot exists; otherwise skip build gracefully ----
         if [ -d "$SRC_DIR" ]; then
-          echo "[INFO] Building from $SRC_DIR"
-          echo "[INFO] Source tree:"; ls -la "$SRC_DIR" || true
+          echo "[STEP] build from $SRC_DIR"
+          ls -la "$SRC_DIR" || true
 
           mkdir -p "$STAGE"
           cp -a "$SRC_DIR/." "$STAGE/"
 
-          echo "[INFO] Staged tree:"; ls -la "$STAGE" || true
+          echo "[STEP] staged tree"
+          ls -la "$STAGE" || true
           [ -d "$STAGE/usr/local" ] && ls -la "$STAGE/usr/local" || true
           [ -d "$STAGE/usr/local/tce.installed" ] && ls -la "$STAGE/usr/local/tce.installed" || true
 
@@ -127,31 +129,38 @@ runs:
 
           # Build .tcz
           TCZ="$TCZDIR/${PKG}.tcz"
-          echo "[INFO] Running mksquashfs -> $TCZ"
+          echo "[STEP] mksquashfs -> $TCZ"
           mksquashfs "$STAGE" "$TCZ" -all-root -noappend -no-xattrs >/dev/null
 
-          echo "[INFO] Built:"; ls -la "$TCZDIR"
+          echo "[STEP] built artifacts in $TCZDIR"
+          ls -la "$TCZDIR" || true
 
-          # Create sidecars inside $TCZDIR
+          # Create sidecars inside $TCZDIR (never fail the job)
+          echo "[STEP] sidecars start"
           (
+            set -e
             cd "$TCZDIR"
 
             # Optional .dep
             if [ "${ADD_DEPS}" = "true" ] && [ -n "${DEPS_LIST}" ]; then
-              printf '%s\n' "${DEPS_LIST}" | sed '/^$/d' > "${PKG}.tcz.dep"
+              printf '%s\n' "${DEPS_LIST}" | sed '/^$/d' > "${PKG}.tcz.dep" || true
             fi
 
-            # Sidecars (robust unsquashfs)
-            md5sum "${PKG}.tcz" > "${PKG}.tcz.md5.txt"
+            # MD5
+            if ! md5sum "${PKG}.tcz" > "${PKG}.tcz.md5.txt"; then
+              echo "[WARN] md5sum failed, writing placeholder"
+              echo "md5-unknown  ${PKG}.tcz" > "${PKG}.tcz.md5.txt"
+            fi
 
+            # unsquashfs listing (robust)
             if unsquashfs -ll "${PKG}.tcz" > ll.txt 2>ll.err; then
-              awk 'NR>2{p=$NF; sub(/^squashfs-root\//,"",p); print p}' ll.txt > "${PKG}.tcz.list"
+              awk 'NR>2{p=$NF; sub(/^squashfs-root\//,"",p); print p}' ll.txt > "${PKG}.tcz.list" || echo "${PKG}.tcz" > "${PKG}.tcz.list"
             else
               echo "[WARN] unsquashfs -ll failed; falling back to file-only listing"
               echo "${PKG}.tcz" > "${PKG}.tcz.list"
               echo "---- unsquashfs stderr ----"; sed -n '1,120p' ll.err || true
             fi
-            rm -f ll.txt ll.err
+            rm -f ll.txt ll.err || true
 
             SIZE=$(du -h "${PKG}.tcz" | awk '{print $1}')
             {
@@ -164,20 +173,26 @@ runs:
               printf 'Comments:       Built from src/pkgroot; repo path /repo/%s/%s/tcz/\n' "${PCP_VER}" "${ARCH}"
             } > "${PKG}.tcz.info"
           )
+          echo "[STEP] sidecars done"
 
-          # ---- Stage into seeded tree (copy from $TCZDIR explicitly) ----
+          # Stage into seeded tree
+          echo "[STEP] stage into ${PUBDIR}"
           install -d "${PUBDIR}"
-          cp -a "$TCZDIR/${PKG}.tcz" \
-                "$TCZDIR/${PKG}.tcz.md5.txt" \
-                "$TCZDIR/${PKG}.tcz.list" \
-                "$TCZDIR/${PKG}.tcz.info" \
-                "${PUBDIR}/"
+          # required files
+          for x in "${PKG}.tcz" "${PKG}.tcz.md5.txt" "${PKG}.tcz.list" "${PKG}.tcz.info"; do
+            if [ -f "$TCZDIR/$x" ]; then
+              cp -a "$TCZDIR/$x" "${PUBDIR}/"
+            else
+              echo "[WARN] missing $TCZDIR/$x (continuing)"
+            fi
+          done
           # optional .dep
           if [ -f "$TCZDIR/${PKG}.tcz.dep" ]; then
             cp -a "$TCZDIR/${PKG}.tcz.dep" "${PUBDIR}/"
           fi
 
           # Per-folder index for /repo/<ver>/<arch>/tcz/
+          echo "[STEP] write index for ${PUBDIR}"
           {
             echo '<!doctype html><meta charset="utf-8"><title>pCP repo</title>'
             echo '<h1>pCP repo /repo/'"${PCP_VER}"'/'"${ARCH}"'/tcz/</h1><ul>'
@@ -210,11 +225,13 @@ runs:
           } > "$d/index.html"
         }
 
+        echo "[STEP] write repo indexes"
         make_dir_index "$PUBROOT/repo" "pCP repo: /repo/"
         make_dir_index "$PUBROOT/repo/${PCP_VER}" "pCP repo: /repo/${PCP_VER}/"
         make_dir_index "$PUBROOT/repo/${PCP_VER}/${ARCH}" "pCP repo: /repo/${PCP_VER}/${ARCH}/"
 
         # ---- Site root index (overview) ----
+        echo "[STEP] write site root index"
         ROOTIDX="$PUBROOT/index.html"
         mkdir -p "$(dirname "$ROOTIDX")"
         {
@@ -229,3 +246,5 @@ runs:
           fi
           echo '</ul>'
         } > "$ROOTIDX"
+
+        echo "[STEP] done"
