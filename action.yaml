@@ -26,7 +26,7 @@ inputs:
     required: false
     default: "false"
   deps_list:
-    description: Newline-separated .dep contents
+    description: Newline-separated .dep contents (with .tcz suffix)
     required: false
     default: ""
   pages_repo:
@@ -85,10 +85,9 @@ runs:
           VERSION="$(date +%Y.%m.%d)"
         fi
 
-        [ -d "$SRC_DIR" ] || { echo "ERROR: missing $SRC_DIR"; exit 1; }
-
+        # Clean build dirs (we will seed PUBROOT with existing site)
         rm -rf "$BUILD"
-        mkdir -p "$STAGE" "$TCZDIR" "$PUBROOT" "$PUBDIR"
+        mkdir -p "$TCZDIR" "$PUBROOT" "$PUBDIR"
 
         # ---- Seed existing gh-pages into PUBROOT (so indexes list ALL packages) ----
         if [ -n "${PAGES_REPO}" ]; then
@@ -106,60 +105,67 @@ runs:
           fi
         fi
 
-        # ---- Build .tcz from src/pkgroot -------------------------------------------
-        cp -a "$SRC_DIR/." "$STAGE/"
+        # ---- Build only if src/pkgroot exists; otherwise skip build gracefully ----
+        if [ -d "$SRC_DIR" ]; then
+          echo "[INFO] Building from $SRC_DIR"
+          mkdir -p "$STAGE"
+          cp -a "$SRC_DIR/." "$STAGE/"
 
-        # Ensure tce.installed scripts are executable (handles web-edited 0644 files)
-        if [ -d "$STAGE/usr/local/tce.installed" ]; then
-          chmod 755 "$STAGE/usr/local/tce.installed/"* || true
+          # Ensure tce.installed scripts are executable (handles web-edited 0644 files)
+          if [ -d "$STAGE/usr/local/tce.installed" ]; then
+            chmod 755 "$STAGE/usr/local/tce.installed/"* || true
+          fi
+
+          # Build .tcz
+          TCZ="$TCZDIR/${PKG}.tcz"
+          mksquashfs "$STAGE" "$TCZ" -all-root -noappend -no-xattrs >/dev/null
+
+          pushd "$TCZDIR" >/dev/null
+
+          # Optional .dep (one package per line)
+          if [ "${ADD_DEPS}" = "true" ] && [ -n "${DEPS_LIST}" ]; then
+            printf '%s\n' "${DEPS_LIST}" | sed '/^$/d' > "${PKG}.tcz.dep"
+          fi
+
+          # Sidecars
+          md5sum "${PKG}.tcz" > "${PKG}.tcz.md5.txt"
+          unsquashfs -ll "${PKG}.tcz" \
+            | awk 'NR>2{p=$NF; sub(/^squashfs-root\//,"",p); print p}' \
+            > "${PKG}.tcz.list"
+          SIZE=$(du -h "${PKG}.tcz" | awk '{print $1}')
+
+          # .info (unversioned filenames; Version only inside .info)
+          {
+            printf 'Title:          %s\n' "${PKG}"
+            printf 'Description:    %s\n' "${DESC}"
+            printf 'Version:        %s\n' "${VERSION}"
+            printf 'Author:         %s\n' "${AUTHOR}"
+            printf 'Copying-policy: MIT\n'
+            printf 'Size:           %s\n' "${SIZE}"
+            printf 'Comments:       Built from src/pkgroot; repo path /repo/%s/%s/tcz/\n' "${PCP_VER}" "${ARCH}"
+          } > "${PKG}.tcz.info"
+
+          # Stage into seeded tree
+          install -d "${PUBDIR}"
+          cp -a ${PKG}.tcz* "${PUBDIR}/"
+
+          # Per-folder index for /repo/<ver>/<arch>/tcz/
+          {
+            echo '<!doctype html><meta charset="utf-8"><title>pCP repo</title>'
+            echo '<h1>pCP repo /repo/'"${PCP_VER}"'/'"${ARCH}"'/tcz/</h1><ul>'
+            for f in "${PUBDIR}"/*; do
+              bn=$(basename "$f")
+              printf '<li><a href="%s">%s</a></li>\n' "$bn" "$bn"
+            done
+            echo '</ul>'
+          } > "${PUBDIR}/index.html"
+
+          popd >/dev/null
+        else
+          echo "[WARN] No source at $SRC_DIR — skipping build; regenerating directory indexes only."
         fi
 
-        TCZ="$TCZDIR/${PKG}.tcz"
-        mksquashfs "$STAGE" "$TCZ" -all-root -noappend -no-xattrs >/dev/null
-
-        pushd "$TCZDIR" >/dev/null
-
-        # Optional .dep (one package per line)
-        if [ "${ADD_DEPS}" = "true" ] && [ -n "${DEPS_LIST}" ]; then
-          printf '%s\n' "${DEPS_LIST}" | sed '/^$/d' > "${PKG}.tcz.dep"
-        fi
-
-        # Sidecars
-        md5sum "${PKG}.tcz" > "${PKG}.tcz.md5.txt"
-        unsquashfs -ll "${PKG}.tcz" \
-          | awk 'NR>2{p=$NF; sub(/^squashfs-root\//,"",p); print p}' \
-          > "${PKG}.tcz.list"
-        SIZE=$(du -h "${PKG}.tcz" | awk '{print $1}')
-
-        # .info
-        {
-          printf 'Title:          %s\n' "${PKG}"
-          printf 'Description:    %s\n' "${DESC}"
-          printf 'Version:        %s\n' "${VERSION}"
-          printf 'Author:         %s\n' "${AUTHOR}"
-          printf 'Copying-policy: MIT\n'
-          printf 'Size:           %s\n' "${SIZE}"
-          printf 'Comments:       Built from src/pkgroot; repo path /repo/%s/%s/tcz/\n' "${PCP_VER}" "${ARCH}"
-        } > "${PKG}.tcz.info"
-
-        # Stage into seeded tree
-        install -d "${PUBDIR}"
-        cp -a ${PKG}.tcz* "${PUBDIR}/"
-
-        # ---- Per-folder index for /repo/<ver>/<arch>/tcz/ ---------------------------
-        {
-          echo '<!doctype html><meta charset="utf-8"><title>pCP repo</title>'
-          echo '<h1>pCP repo /repo/'"${PCP_VER}"'/'"${ARCH}"'/tcz/</h1><ul>'
-          for f in "${PUBDIR}"/*; do
-            bn=$(basename "$f")
-            printf '<li><a href="%s">%s</a></li>\n' "$bn" "$bn"
-          done
-          echo '</ul>'
-        } > "${PUBDIR}/index.html"
-
-        popd >/dev/null
-
-        # ---- Directory indexes for browsing the tree --------------------------------
+        # ---- Directory indexes for browsing the tree -------------------------------
         make_dir_index() {
           local d="$1"; local title="$2"
           mkdir -p "$d"
@@ -189,7 +195,7 @@ runs:
         # arch level: lists subfolders (e.g. tcz/)
         make_dir_index "$PUBROOT/repo/${PCP_VER}/${ARCH}" "pCP repo: /repo/${PCP_VER}/${ARCH}/"
 
-        # ---- Site root index (overview of the whole repo tree) ----------------------
+        # ---- Site root index (overview of the whole repo tree) ---------------------
         ROOTIDX="$PUBROOT/index.html"
         mkdir -p "$(dirname "$ROOTIDX")"
         {
