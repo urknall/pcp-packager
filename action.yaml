@@ -87,11 +87,10 @@ runs:
           VERSION="$(date +%Y.%m.%d)"
         fi
 
-        # Clean build dirs (we will seed PUBROOT with existing site)
         rm -rf "$BUILD"
         mkdir -p "$TCZDIR" "$PUBROOT" "$PUBDIR"
 
-        # ---- Seed existing gh-pages into PUBROOT (so indexes list ALL packages) ----
+        # ---- Seed existing gh-pages into PUBROOT ----
         if [ -n "${PAGES_REPO}" ]; then
           echo "[INFO] Seeding from ${PAGES_REPO}@${PAGES_BRANCH}"
           GIT_URL="https://github.com/${PAGES_REPO}.git"
@@ -119,7 +118,7 @@ runs:
           [ -d "$STAGE/usr/local" ] && ls -la "$STAGE/usr/local" || true
           [ -d "$STAGE/usr/local/tce.installed" ] && ls -la "$STAGE/usr/local/tce.installed" || true
 
-          # Ensure tce.installed scripts are executable (no glob pitfalls)
+          # Ensure tce.installed scripts are executable
           if [ -d "$STAGE/usr/local/tce.installed" ]; then
             for f in "$STAGE"/usr/local/tce.installed/*; do
               [ -f "$f" ] && chmod 755 "$f" || true
@@ -133,7 +132,7 @@ runs:
 
           echo "[INFO] Built:"; ls -la "$TCZDIR"
 
-          # Work inside tcz dir without pushd/popd
+          # Create sidecars inside $TCZDIR
           (
             cd "$TCZDIR"
 
@@ -142,7 +141,7 @@ runs:
               printf '%s\n' "${DEPS_LIST}" | sed '/^$/d' > "${PKG}.tcz.dep"
             fi
 
-            # Sidecars (with robust unsquashfs fallback)
+            # Sidecars (robust unsquashfs)
             md5sum "${PKG}.tcz" > "${PKG}.tcz.md5.txt"
 
             if unsquashfs -ll "${PKG}.tcz" > ll.txt 2>ll.err; then
@@ -166,9 +165,17 @@ runs:
             } > "${PKG}.tcz.info"
           )
 
-          # Stage into seeded tree
+          # ---- Stage into seeded tree (copy from $TCZDIR explicitly) ----
           install -d "${PUBDIR}"
-          cp -a ${PKG}.tcz* "${PUBDIR}/"
+          cp -a "$TCZDIR/${PKG}.tcz" \
+                "$TCZDIR/${PKG}.tcz.md5.txt" \
+                "$TCZDIR/${PKG}.tcz.list" \
+                "$TCZDIR/${PKG}.tcz.info" \
+                "${PUBDIR}/"
+          # optional .dep
+          if [ -f "$TCZDIR/${PKG}.tcz.dep" ]; then
+            cp -a "$TCZDIR/${PKG}.tcz.dep" "${PUBDIR}/"
+          fi
 
           # Per-folder index for /repo/<ver>/<arch>/tcz/
           {
@@ -184,7 +191,7 @@ runs:
           echo "[WARN] No source at $SRC_DIR — skipping build; regenerating directory indexes only."
         fi
 
-        # ---- Directory indexes for browsing the tree -------------------------------
+        # ---- Directory indexes for browsing the tree ----
         make_dir_index() {
           local d="$1"; local title="$2"
           mkdir -p "$d"
@@ -203,16 +210,11 @@ runs:
           } > "$d/index.html"
         }
 
-        # repo root: lists versions (e.g. 16.x/)
         make_dir_index "$PUBROOT/repo" "pCP repo: /repo/"
-
-        # version level: lists arches (e.g. armhf/, aarch64/)
         make_dir_index "$PUBROOT/repo/${PCP_VER}" "pCP repo: /repo/${PCP_VER}/"
-
-        # arch level: lists subfolders (e.g. tcz/)
         make_dir_index "$PUBROOT/repo/${PCP_VER}/${ARCH}" "pCP repo: /repo/${PCP_VER}/${ARCH}/"
 
-        # ---- Site root index (overview of the whole repo tree) ---------------------
+        # ---- Site root index (overview) ----
         ROOTIDX="$PUBROOT/index.html"
         mkdir -p "$(dirname "$ROOTIDX")"
         {
