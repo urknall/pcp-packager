@@ -66,7 +66,8 @@ runs:
         PAGES_BRANCH: ${{ inputs.pages_branch }}
         PAGES_TOKEN:  ${{ inputs.pages_token }}
       run: |
-        set -euo pipefail
+        set -Eeuo pipefail
+        set -o errtrace
         trap 'ec=$?; echo "[ERROR] failed at line ${LINENO} (exit ${ec})"; exit ${ec}' ERR
 
         ROOT="$PWD"
@@ -109,22 +110,17 @@ runs:
         # ---- Build only if src/pkgroot exists; otherwise skip build gracefully ----
         if [ -d "$SRC_DIR" ]; then
           echo "[INFO] Building from $SRC_DIR"
-          echo "[INFO] Source tree:"
-          ls -la "$SRC_DIR" || true
+          echo "[INFO] Source tree:"; ls -la "$SRC_DIR" || true
 
           mkdir -p "$STAGE"
-          # copy contents (if empty, this is still fine)
           cp -a "$SRC_DIR/." "$STAGE/"
 
-          echo "[INFO] Staged tree:"
-          ls -la "$STAGE" || true
+          echo "[INFO] Staged tree:"; ls -la "$STAGE" || true
           [ -d "$STAGE/usr/local" ] && ls -la "$STAGE/usr/local" || true
           [ -d "$STAGE/usr/local/tce.installed" ] && ls -la "$STAGE/usr/local/tce.installed" || true
 
-          # Ensure tce.installed scripts are executable (handles web-edited 0644 files)
+          # Ensure tce.installed scripts are executable (no glob pitfalls)
           if [ -d "$STAGE/usr/local/tce.installed" ]; then
-            # avoid failing on empty globs
-            shopt -s nullglob || true 2>/dev/null || true
             for f in "$STAGE"/usr/local/tce.installed/*; do
               [ -f "$f" ] && chmod 755 "$f" || true
             done
@@ -135,33 +131,40 @@ runs:
           echo "[INFO] Running mksquashfs -> $TCZ"
           mksquashfs "$STAGE" "$TCZ" -all-root -noappend -no-xattrs >/dev/null
 
-          echo "[INFO] Built:"
-          ls -la "$TCZDIR"
+          echo "[INFO] Built:"; ls -la "$TCZDIR"
 
-          pushd "$TCZDIR" >/dev/null
+          # Work inside tcz dir without pushd/popd
+          (
+            cd "$TCZDIR"
 
-          # Optional .dep (one package per line)
-          if [ "${ADD_DEPS}" = "true" ] && [ -n "${DEPS_LIST}" ]; then
-            printf '%s\n' "${DEPS_LIST}" | sed '/^$/d' > "${PKG}.tcz.dep"
-          fi
+            # Optional .dep
+            if [ "${ADD_DEPS}" = "true" ] && [ -n "${DEPS_LIST}" ]; then
+              printf '%s\n' "${DEPS_LIST}" | sed '/^$/d' > "${PKG}.tcz.dep"
+            fi
 
-          # Sidecars
-          md5sum "${PKG}.tcz" > "${PKG}.tcz.md5.txt"
-          unsquashfs -ll "${PKG}.tcz" \
-            | awk 'NR>2{p=$NF; sub(/^squashfs-root\//,"",p); print p}' \
-            > "${PKG}.tcz.list"
-          SIZE=$(du -h "${PKG}.tcz" | awk '{print $1}')
+            # Sidecars (with robust unsquashfs fallback)
+            md5sum "${PKG}.tcz" > "${PKG}.tcz.md5.txt"
 
-          # .info (unversioned filenames; Version only inside .info)
-          {
-            printf 'Title:          %s\n' "${PKG}"
-            printf 'Description:    %s\n' "${DESC}"
-            printf 'Version:        %s\n' "${VERSION}"
-            printf 'Author:         %s\n' "${AUTHOR}"
-            printf 'Copying-policy: MIT\n'
-            printf 'Size:           %s\n' "${SIZE}"
-            printf 'Comments:       Built from src/pkgroot; repo path /repo/%s/%s/tcz/\n' "${PCP_VER}" "${ARCH}"
-          } > "${PKG}.tcz.info"
+            if unsquashfs -ll "${PKG}.tcz" > ll.txt 2>ll.err; then
+              awk 'NR>2{p=$NF; sub(/^squashfs-root\//,"",p); print p}' ll.txt > "${PKG}.tcz.list"
+            else
+              echo "[WARN] unsquashfs -ll failed; falling back to file-only listing"
+              echo "${PKG}.tcz" > "${PKG}.tcz.list"
+              echo "---- unsquashfs stderr ----"; sed -n '1,120p' ll.err || true
+            fi
+            rm -f ll.txt ll.err
+
+            SIZE=$(du -h "${PKG}.tcz" | awk '{print $1}')
+            {
+              printf 'Title:          %s\n' "${PKG}"
+              printf 'Description:    %s\n' "${DESC}"
+              printf 'Version:        %s\n' "${VERSION}"
+              printf 'Author:         %s\n' "${AUTHOR}"
+              printf 'Copying-policy: MIT\n'
+              printf 'Size:           %s\n' "${SIZE}"
+              printf 'Comments:       Built from src/pkgroot; repo path /repo/%s/%s/tcz/\n' "${PCP_VER}" "${ARCH}"
+            } > "${PKG}.tcz.info"
+          )
 
           # Stage into seeded tree
           install -d "${PUBDIR}"
@@ -177,8 +180,6 @@ runs:
             done
             echo '</ul>'
           } > "${PUBDIR}/index.html"
-
-          popd >/dev/null
         else
           echo "[WARN] No source at $SRC_DIR — skipping build; regenerating directory indexes only."
         fi
@@ -191,11 +192,9 @@ runs:
             echo '<!doctype html><meta charset="utf-8"><title>'"$title"'</title>'
             echo '<h1>'"$title"'</h1><ul>'
             if [ -d "$d" ]; then
-              # list subdirectories first
               (cd "$d" && ls -1A) | while read name; do
                 [ -d "$d/$name" ] && printf '<li><a href="%s/">%s/</a></li>\n' "$name" "$name"
               done
-              # then files (if any)
               (cd "$d" && ls -1A) | while read name; do
                 [ -f "$d/$name" ] && printf '<li><a href="%s">%s</a></li>\n' "$name" "$name"
               done
