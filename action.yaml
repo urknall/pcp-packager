@@ -67,6 +67,7 @@ runs:
         PAGES_TOKEN:  ${{ inputs.pages_token }}
       run: |
         set -euo pipefail
+        trap 'ec=$?; echo "[ERROR] failed at line ${LINENO} (exit ${ec})"; exit ${ec}' ERR
 
         ROOT="$PWD"
         SRC_DIR="$ROOT/src/pkgroot"
@@ -108,17 +109,34 @@ runs:
         # ---- Build only if src/pkgroot exists; otherwise skip build gracefully ----
         if [ -d "$SRC_DIR" ]; then
           echo "[INFO] Building from $SRC_DIR"
+          echo "[INFO] Source tree:"
+          ls -la "$SRC_DIR" || true
+
           mkdir -p "$STAGE"
+          # copy contents (if empty, this is still fine)
           cp -a "$SRC_DIR/." "$STAGE/"
+
+          echo "[INFO] Staged tree:"
+          ls -la "$STAGE" || true
+          [ -d "$STAGE/usr/local" ] && ls -la "$STAGE/usr/local" || true
+          [ -d "$STAGE/usr/local/tce.installed" ] && ls -la "$STAGE/usr/local/tce.installed" || true
 
           # Ensure tce.installed scripts are executable (handles web-edited 0644 files)
           if [ -d "$STAGE/usr/local/tce.installed" ]; then
-            chmod 755 "$STAGE/usr/local/tce.installed/"* || true
+            # avoid failing on empty globs
+            shopt -s nullglob || true 2>/dev/null || true
+            for f in "$STAGE"/usr/local/tce.installed/*; do
+              [ -f "$f" ] && chmod 755 "$f" || true
+            done
           fi
 
           # Build .tcz
           TCZ="$TCZDIR/${PKG}.tcz"
+          echo "[INFO] Running mksquashfs -> $TCZ"
           mksquashfs "$STAGE" "$TCZ" -all-root -noappend -no-xattrs >/dev/null
+
+          echo "[INFO] Built:"
+          ls -la "$TCZDIR"
 
           pushd "$TCZDIR" >/dev/null
 
