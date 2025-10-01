@@ -178,7 +178,6 @@ runs:
           # Stage into seeded tree
           echo "[STEP] stage into ${PUBDIR}"
           install -d "${PUBDIR}"
-          # required files
           for x in "${PKG}.tcz" "${PKG}.tcz.md5.txt" "${PKG}.tcz.list" "${PKG}.tcz.info"; do
             if [ -f "$TCZDIR/$x" ]; then
               cp -a "$TCZDIR/$x" "${PUBDIR}/"
@@ -186,7 +185,6 @@ runs:
               echo "[WARN] missing $TCZDIR/$x (continuing)"
             fi
           done
-          # optional .dep
           if [ -f "$TCZDIR/${PKG}.tcz.dep" ]; then
             cp -a "$TCZDIR/${PKG}.tcz.dep" "${PUBDIR}/"
           fi
@@ -196,33 +194,41 @@ runs:
           {
             echo '<!doctype html><meta charset="utf-8"><title>pCP repo</title>'
             echo '<h1>pCP repo /repo/'"${PCP_VER}"'/'"${ARCH}"'/tcz/</h1><ul>'
-            # Always succeed even if ls fails or returns nothing
-            { (cd "${PUBDIR}" && ls -1A) 2>/dev/null || true; } | while read -r bn; do
-              printf '<li><a href="%s">%s</a></li>\n' "$bn" "$bn"
-            done
+            (
+              shopt -s nullglob dotglob
+              for e in "${PUBDIR}/"*; do
+                bn=$(basename "$e")
+                printf '<li><a href="%s">%s</a></li>\n' "$bn" "$bn"
+              done
+            )
             echo '</ul>'
           } > "${PUBDIR}/index.html"
         else
           echo "[WARN] No source at $SRC_DIR — skipping build; regenerating directory indexes only."
         fi
 
-        # ---- Directory indexes for browsing the tree ----
+        # ---- Directory indexes for browsing the tree (pure Bash, no pipes) ----
         make_dir_index() {
           local d="$1"; local title="$2"
           mkdir -p "$d"
           {
             echo '<!doctype html><meta charset="utf-8"><title>'"$title"'</title>'
             echo '<h1>'"$title"'</h1><ul>'
-            if [ -d "$d" ]; then
+            (
+              shopt -s nullglob dotglob
               # subdirectories
-              { (cd "$d" && ls -1A) 2>/dev/null || true; } | while read -r name; do
-                [ -d "$d/$name" ] && printf '<li><a href="%s/">%s/</a></li>\n' "$name" "$name"
+              for e in "$d"/*/; do
+                [ -d "$e" ] || continue
+                bn=$(basename "$e")
+                printf '<li><a href="%s/">%s/</a></li>\n' "$bn" "$bn"
               done
               # files
-              { (cd "$d" && ls -1A) 2>/dev/null || true; } | while read -r name; do
-                [ -f "$d/$name" ] && printf '<li><a href="%s">%s</a></li>\n' "$name" "$name"
+              for e in "$d"/*; do
+                [ -f "$e" ] || continue
+                bn=$(basename "$e")
+                printf '<li><a href="%s">%s</a></li>\n' "$bn" "$bn"
               done
-            fi
+            )
             echo '</ul>'
           } > "$d/index.html"
         }
@@ -232,7 +238,7 @@ runs:
         make_dir_index "$PUBROOT/repo/${PCP_VER}" "pCP repo: /repo/${PCP_VER}/"
         make_dir_index "$PUBROOT/repo/${PCP_VER}/${ARCH}" "pCP repo: /repo/${PCP_VER}/${ARCH}/"
 
-        # ---- Site root index (overview) ----
+        # ---- Site root index (overview) using globbing (no find/pipe) ----
         echo "[STEP] write site root index"
         ROOTIDX="$PUBROOT/index.html"
         mkdir -p "$(dirname "$ROOTIDX")"
@@ -240,9 +246,14 @@ runs:
           echo '<!doctype html><meta charset="utf-8"><title>pCP repo root</title>'
           echo '<h1>pCP repo root</h1><ul>'
           if [ -d "$PUBROOT/repo" ]; then
-            { (cd "$PUBROOT" && find repo -type d | sort) 2>/dev/null || true; } | while read -r d; do
-              printf '<li><a href="%s/">%s/</a></li>\n' "$d" "$d"
-            done
+            (
+              shopt -s nullglob dotglob globstar
+              for dir in "$PUBROOT"/repo/**/; do
+                [ -d "$dir" ] || continue
+                rel=${dir#"$PUBROOT"/}
+                printf '<li><a href="%s">%s</a></li>\n' "$rel" "$rel"
+              done
+            )
           else
             echo '<li><em>No repo/ directory yet</em></li>'
           fi
