@@ -196,8 +196,8 @@ runs:
           {
             echo '<!doctype html><meta charset="utf-8"><title>pCP repo</title>'
             echo '<h1>pCP repo /repo/'"${PCP_VER}"'/'"${ARCH}"'/tcz/</h1><ul>'
-            for f in "${PUBDIR}"/*; do
-              bn=$(basename "$f")
+            # Always succeed even if ls fails or returns nothing
+            { (cd "${PUBDIR}" && ls -1A) 2>/dev/null || true; } | while read -r bn; do
               printf '<li><a href="%s">%s</a></li>\n' "$bn" "$bn"
             done
             echo '</ul>'
@@ -214,10 +214,12 @@ runs:
             echo '<!doctype html><meta charset="utf-8"><title>'"$title"'</title>'
             echo '<h1>'"$title"'</h1><ul>'
             if [ -d "$d" ]; then
-              (cd "$d" && ls -1A) | while read name; do
+              # subdirectories
+              { (cd "$d" && ls -1A) 2>/dev/null || true; } | while read -r name; do
                 [ -d "$d/$name" ] && printf '<li><a href="%s/">%s/</a></li>\n' "$name" "$name"
               done
-              (cd "$d" && ls -1A) | while read name; do
+              # files
+              { (cd "$d" && ls -1A) 2>/dev/null || true; } | while read -r name; do
                 [ -f "$d/$name" ] && printf '<li><a href="%s">%s</a></li>\n' "$name" "$name"
               done
             fi
@@ -238,7 +240,7 @@ runs:
           echo '<!doctype html><meta charset="utf-8"><title>pCP repo root</title>'
           echo '<h1>pCP repo root</h1><ul>'
           if [ -d "$PUBROOT/repo" ]; then
-            (cd "$PUBROOT" && find repo -type d | sort) | while read d; do
+            { (cd "$PUBROOT" && find repo -type d | sort) 2>/dev/null || true; } | while read -r d; do
               printf '<li><a href="%s/">%s/</a></li>\n' "$d" "$d"
             done
           else
