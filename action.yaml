@@ -152,9 +152,28 @@ runs:
               echo "md5-unknown  ${PKG}.tcz" > "${PKG}.tcz.md5.txt"
             fi
 
-            # unsquashfs listing (robust)
+            # unsquashfs listing (files + leaf dirs only)
             if unsquashfs -ll "${PKG}.tcz" > ll.txt 2>ll.err; then
-              awk 'NR>2{p=$NF; sub(/^squashfs-root\//,"",p); print p}' ll.txt > "${PKG}.tcz.list" || echo "${PKG}.tcz" > "${PKG}.tcz.list"
+              awk '
+                NR>2 {
+                  mode = $1
+                  p = $NF
+                  sub(/^squashfs-root\//,"",p)
+                  if (p == "") next
+                  n++; P[n] = p; T[n] = substr(mode,1,1)
+                }
+                END {
+                  for (i=1; i<=n; i++) {
+                    if (T[i] != "d") { print P[i]; continue }
+                    leaf = 1
+                    for (j=1; j<=n; j++) if (i!=j) {
+                      if (index(P[j], P[i] "/") == 1) { leaf = 0; break }
+                    }
+                    if (leaf) print P[i]
+                  }
+                }
+              ' ll.txt | LC_ALL=C sort > "${PKG}.tcz.list" \
+              || echo "${PKG}.tcz" > "${PKG}.tcz.list"
             else
               echo "[WARN] unsquashfs -ll failed; falling back to file-only listing"
               echo "${PKG}.tcz" > "${PKG}.tcz.list"
